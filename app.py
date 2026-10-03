@@ -1,64 +1,74 @@
 from flask import Flask, render_template, request, jsonify
 import sqlite3
-import datetime
+import os
 
 app = Flask(__name__)
+DB_FILE = 'scampoint.db'
 
-# Helper function to query the database
-def check_threat(message):
-    message = message.lower()
-    conn = sqlite3.connect('scampoint.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT keyword, rebuttal FROM legal_rules")
-    rules = cursor.fetchall()
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS whitelist (domain TEXT UNIQUE)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS keywords (word TEXT UNIQUE)''')
+    
+    whitelist_domains = ['mygov.in', 'police.gov.in', 'rbi.org.in', 'sbi.co.in']
+    for domain in whitelist_domains:
+        c.execute("INSERT OR IGNORE INTO whitelist (domain) VALUES (?)", (domain,))
+        
+    scam_keywords = ['digital arrest', 'cbi', 'customs', 'transfer money', 'urgent', 'fedex', 'trai', 'arrest warrant', 'otp']
+    for word in scam_keywords:
+        c.execute("INSERT OR IGNORE INTO keywords (word) VALUES (?)", (word,))
+        
+    conn.commit()
     conn.close()
 
-    triggered_rebuttals = []
-    for keyword, rebuttal in rules:
-        if keyword in message:
-            triggered_rebuttals.append(rebuttal)
+def check_message(text):
+    text_lower = text.lower()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    c.execute("SELECT domain FROM whitelist")
+    whitelists = [row[0] for row in c.fetchall()]
+    for domain in whitelists:
+        if domain in text_lower:
+            conn.close()
+            return {"status": "safe", "message": f"Message contains verified official domain: {domain}. It appears safe."}
             
-    return triggered_rebuttals
-
-# Helper function to simulate dispatch (Replace with Twilio API tomorrow)
-def dispatch_family_alert(alert_type):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n[URGENT DISPATCH - {timestamp}]")
-    print(f"Alert Type: {alert_type}")
-    print("Sending SMS to Guardian: 'URGENT: Your elder parent has triggered a ScamPoint Alert. Call them immediately to disrupt a potential scam.'")
-    print("--------------------------------------------------\n")
-    return True
+    c.execute("SELECT word FROM keywords")
+    keywords = [row[0] for row in c.fetchall()]
+    detected_words = []
+    
+    for word in keywords:
+        if word in text_lower:
+            detected_words.append(word)
+            
+    conn.close()
+    
+    if len(detected_words) > 0:
+        return {
+            "status": "danger",
+            "message": "CRITICAL WARNING: Potential Scam Detected",
+            "detected": detected_words,
+            "law": "STATUTORY FACT: The Ministry of Home Affairs and Indian law do not recognize 'digital arrest'. Authorities will never demand money, isolate you on video calls, or serve arrest notices via messaging platforms."
+        }
+        
+    return {"status": "neutral", "message": "No immediate threat detected, but always remain cautious."}
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-@app.route('/analyze', methods=['POST'])
-def analyze_message():
+@app.route('/scan', methods=['POST'])
+def scan():
     data = request.get_json()
     message = data.get('message', '')
+    if not message.strip():
+        return jsonify({"status": "error", "message": "Please enter a message to scan."})
     
-    rebuttals = check_threat(message)
-    
-    if rebuttals:
-        # Threat detected! Dispatch silent alert to family.
-        dispatch_family_alert("Automated Threat Detection")
-        return jsonify({
-            "status": "danger",
-            "message": "⚠️ Coercive Threat Detected!",
-            "rebuttals": rebuttals
-        })
-    else:
-        return jsonify({
-            "status": "safe",
-            "message": "✅ No known scam keywords detected.",
-            "rebuttals": []
-        })
-
-@app.route('/sos', methods=['POST'])
-def trigger_sos():
-    dispatch_family_alert("Manual 1-Tap SOS / Call Panic")
-    return jsonify({"status": "success", "message": "SOS Alert dispatched to registered family members."})
+    result = check_message(message)
+    return jsonify(result)
 
 if __name__ == '__main__':
+    if not os.path.exists(DB_FILE):
+        init_db()
     app.run(debug=True, port=5000)
